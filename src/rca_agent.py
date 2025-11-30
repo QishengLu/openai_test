@@ -142,13 +142,13 @@ After you get the result, continue your analysis.
                         try:
                             query_lower = query.lower()
                             if "select" in query_lower and "from" in query_lower:
-                                tables_json = list_tables_in_directory("data")
+                                tables_json = list_tables_in_directory(self.data_dir)
                                 tables = json.loads(tables_json)
-                                all_files = [f"data/{t['filename']}" for t in tables] if isinstance(tables, list) else []
+                                all_files = [os.path.join(self.data_dir, t['filename']) for t in tables] if isinstance(tables, list) else []
                                 result = query_parquet_files(all_files, query)
                                 tool_result = f"SQL Result:\n{result}"
                             else:
-                                tables_json = list_tables_in_directory("data")
+                                tables_json = list_tables_in_directory(self.data_dir)
                                 tool_result = f"Search Results:\n{tables_json}"
                         except Exception as e:
                             tool_result = f"Search Error: {e}"
@@ -163,9 +163,10 @@ After you get the result, continue your analysis.
                         # Execute Fetch
                         try:
                             file_path = file_id
-                            if not file_id.startswith("data/") and not os.path.exists(file_id):
-                                if os.path.exists(f"data/{file_id}"):
-                                    file_path = f"data/{file_id}"
+                            if not file_id.startswith(f"{self.data_dir}/") and not os.path.exists(file_id):
+                                potential_path = os.path.join(self.data_dir, file_id)
+                                if os.path.exists(potential_path):
+                                    file_path = potential_path
                             
                             schema_json = get_schema(file_path)
                             sample_query = f"SELECT * FROM '{file_path}' LIMIT 5"
