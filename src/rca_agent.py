@@ -245,5 +245,11 @@ Please conduct a deep research analysis on the above problem using the available
         self.save_history()
 
 if __name__ == "__main__":
-    agent = RCAAgent()
+    import argparse
+    parser = argparse.ArgumentParser(description="Run RCA Agent")
+    parser.add_argument("--data_dir", default="data", help="Directory containing data files")
+    parser.add_argument("--output_path", default="experiments/openai/output.json", help="Path to save output JSON")
+    args = parser.parse_args()
+
+    agent = RCAAgent(data_dir=args.data_dir, output_path=args.output_path)
     agent.run()
