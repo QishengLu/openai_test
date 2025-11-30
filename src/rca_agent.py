@@ -18,8 +18,9 @@ from tools import list_tables_in_directory, get_schema, query_parquet_files
 from prompt.system_prompt import get_system_prompt
 
 class RCAAgent:
-    def __init__(self, data_dir: str = "data"):
+    def __init__(self, data_dir: str = "data", output_path: str = "experiments/openai/output.json"):
         self.data_dir = data_dir
+        self.output_path = output_path
         self.history: List[Dict[str, str]] = []
 
     def call_llm_api(self, prompt: str) -> str:
@@ -195,15 +196,15 @@ After you get the result, continue your analysis.
                 
         return "Analysis stopped after maximum turns."
 
-    def save_history(self, output_path: str = "experiments/openai/output.json"):
+    def save_history(self):
         """Save the conversation history to a JSON file."""
         try:
             # Ensure directory exists
-            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            os.makedirs(os.path.dirname(self.output_path), exist_ok=True)
             
-            with open(output_path, 'w', encoding='utf-8') as f:
+            with open(self.output_path, 'w', encoding='utf-8') as f:
                 json.dump(self.history, f, ensure_ascii=False, indent=2)
-            print(f"\n[System] History saved to {output_path}")
+            print(f"\n[System] History saved to {self.output_path}")
         except Exception as e:
             print(f"\n[System] Error saving history: {e}")
 
