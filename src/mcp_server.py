@@ -33,12 +33,13 @@ def search(query: str) -> str:
             # Execute query
             result = query_parquet_files(all_files, query)
             
+            # Format result as a list of dictionaries for the 'results' key
             return json.dumps({
                 "results": [{
                     "id": "sql_result",
                     "title": "SQL Query Result",
-                    "url": "sql://query",
-                    "text": str(result)
+                    "text": str(result),
+                    "url": "sql://query"
                 }]
             })
         except Exception as e:
@@ -54,9 +55,11 @@ def search(query: str) -> str:
         if isinstance(tables, list):
             for table in tables:
                 if not query or query == "all" or query in table['filename'].lower():
+                    # Ensure each result has id, title, text, and url
                     results.append({
                         "id": table['filename'],
                         "title": table['filename'],
+                        "text": f"Table: {table['filename']}", # Added text field
                         "url": f"file://data/{table['filename']}",
                     })
         
@@ -85,6 +88,8 @@ def fetch(id: str) -> str:
         
         full_text = f"Schema:\n{schema_json}\n\nSample Data (First 10 rows):\n{sample_data}"
         
+        # Return the result object directly, not wrapped in another object
+        # The fetch tool should return the document object itself
         result_object = {
             "id": id,
             "title": id,
