@@ -22,49 +22,19 @@ class RCAAgent:
         self.data_dir = data_dir
         self.history: List[Dict[str, str]] = []
 
-    def execute_tool(self, tool_name: str, tool_args: Dict[str, Any]) -> str:
-        """Execute a tool call against the MCP server."""
-        mcp_server_url = os.getenv("MCP_SERVER_URL")
-        if not mcp_server_url:
-             return "Error: MCP_SERVER_URL not set."
-        
-        # Remove trailing slash if present
-        mcp_server_url = mcp_server_url.rstrip("/")
-        
-        try:
-            print(f"[Agent] Executing tool: {tool_name} with args: {tool_args}")
-            if tool_name == "search":
-                response = requests.post(f"{mcp_server_url}/mcp/search", json=tool_args)
-                response.raise_for_status()
-                data = response.json()
-                # Extract text content from MCP response
-                if "content" in data and isinstance(data["content"], list):
-                    return data["content"][0]["text"]
-                return json.dumps(data)
-            elif tool_name == "fetch":
-                response = requests.post(f"{mcp_server_url}/mcp/fetch", json=tool_args)
-                response.raise_for_status()
-                data = response.json()
-                if "content" in data and isinstance(data["content"], list):
-                    return data["content"][0]["text"]
-                return json.dumps(data)
-            else:
-                return f"Error: Unknown tool {tool_name}"
-        except Exception as e:
-            return f"Error executing tool {tool_name}: {e}"
-
     def call_llm_api(self, prompt: str) -> str:
         """
-        Call OpenAI Responses API for Deep Research with MCP.
+        Call OpenRouter API for Deep Research with MCP.
         """
-        print("\n[System] Calling OpenAI Responses API (o3-deep-research)...")
+        print("\n[System] Calling OpenRouter API (openai/o3-deep-research)...")
         
-        # Use standard OpenAI API Key
-        api_key = os.getenv("OPENAI_API_KEY") or os.getenv("DEEPRESEARCH_API_KEY")
+        api_key = os.getenv("DEEPRESEARCH_API_KEY")
+        base_url = os.getenv("DEEPRESEARCH_API_URL", "https://openrouter.ai/api/v1")
+        model_name = os.getenv("DEEPRESEARCH_MODEL", "openai/o3-deep-research")
         mcp_server_url = os.getenv("MCP_SERVER_URL")
         
         if not api_key:
-            raise ValueError("Please set OPENAI_API_KEY in .env")
+            raise ValueError("Please set DEEPRESEARCH_API_KEY in .env")
         if not mcp_server_url:
             raise ValueError("Please set MCP_SERVER_URL in .env")
             
@@ -72,27 +42,40 @@ class RCAAgent:
         mcp_server_url = mcp_server_url.rstrip("/")
             
         client = OpenAI(
-            api_key=api_key,
+            api_key=api_key, 
+            base_url=base_url,
             timeout=3600
         )
         
         try:
-            # The Responses API uses a different structure
-            # We pass the MCP server configuration directly
-            response = client.responses.create(
-                model="o3-deep-research",
-                input=prompt,
-                tools=[
+            # Use chat.completions.create as requested for OpenRouter
+            # We pass the MCP tool configuration in 'extra_body'
+            
+            completion = client.chat.completions.create(
+                model=model_name,
+                messages=[
                     {
-                        "type": "mcp",
-                        "server_label": "rca_data_server",
-                        "server_url": mcp_server_url,
-                        "allowed_tools": ["search", "fetch"],
-                        "require_approval": "never"
+                        "role": "user",
+                        "content": prompt
                     }
-                ]
+                ],
+                extra_headers={
+                    "HTTP-Referer": "https://github.com/SOTA-agents/api_test",
+                    "X-Title": "RCA Agent",
+                },
+                extra_body={
+                    "tools": [
+                        {
+                            "type": "mcp",
+                            "server_label": "rca_data_server",
+                            "server_url": mcp_server_url,
+                            "allowed_tools": ["search", "fetch"],
+                            "require_approval": "never"
+                        }
+                    ]
+                }
             )
-            return response.output_text
+            return completion.choices[0].message.content
         except Exception as e:
             raise Exception(f"API Call failed: {e}")
 
