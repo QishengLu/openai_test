@@ -1,13 +1,25 @@
+"""
+tools.py — RCA parquet 数据工具
+
+与 Deep_Research/src/rca_tools.py 实现完全对齐（去掉 LangChain @tool 装饰器）。
+"""
 import json
-import duckdb
 from datetime import datetime
 from pathlib import Path
-from typing import Union, List, Dict, Any
+from typing import Union, List
 
 TOKEN_LIMIT = 5000
 
+
+def _import_duckdb():
+    try:
+        import duckdb
+        return duckdb
+    except ImportError:
+        raise ImportError("duckdb is required. Install it with: pip install duckdb")
+
+
 def _serialize_datetime(obj):
-    """Convert datetime objects to ISO format strings for JSON serialization"""
     if isinstance(obj, datetime):
         return obj.isoformat()
     elif isinstance(obj, dict):
@@ -17,23 +29,18 @@ def _serialize_datetime(obj):
     else:
         return obj
 
+
 def _estimate_token_count(text: str) -> int:
-    """Estimate token count using character-based approximation."""
     average_chars_per_token = 3
     return (len(text) + average_chars_per_token - 1) // average_chars_per_token
 
+
 def _enforce_token_limit(payload: str, context: str) -> str:
-    """Ensure payload stays within the token budget before returning"""
     token_estimate = _estimate_token_count(payload)
     if token_estimate <= TOKEN_LIMIT:
         return payload
 
-    # Calculate suggested limit reduction
-    try:
-        current_size = len(json.loads(payload)) if payload.startswith("[") else None
-    except json.JSONDecodeError:
-        current_size = None
-        
+    current_size = len(json.loads(payload)) if payload.startswith("[") else None
     suggested_limit = None
     if current_size:
         ratio = TOKEN_LIMIT / token_estimate
@@ -58,148 +65,187 @@ def _enforce_token_limit(payload: str, context: str) -> str:
     }
     return json.dumps(warning, ensure_ascii=False, indent=2)
 
+
+ALLOWED_STEMS = {
+    "normal_logs", "abnormal_logs",
+    "normal_traces", "abnormal_traces",
+    "normal_metrics", "abnormal_metrics",
+    "normal_metrics_histogram", "abnormal_metrics_histogram",
+    "normal_metrics_sum", "abnormal_metrics_sum",
+}
+
+
+def _sanitize_column_name(name: str) -> str:
+    """Replace dots in column names with underscores to avoid DuckDB dot-notation ambiguity."""
+    return name.replace(".", "_")
+
+
+def _build_rename_select(parquet_path: str) -> str:
+    """Build a SELECT clause that renames dot-containing columns for a parquet file."""
+    duckdb = _import_duckdb()
+    conn = duckdb.connect(":memory:")
+    try:
+        result = conn.execute(f"SELECT * FROM read_parquet('{parquet_path}') LIMIT 0")
+        columns = [desc[0] for desc in result.description]
+    finally:
+        conn.close()
+
+    needs_rename = any("." in col for col in columns)
+    if not needs_rename:
+        return "*"
+
+    parts = []
+    for col in columns:
+        if "." in col:
+            parts.append(f'"{col}" AS {_sanitize_column_name(col)}')
+        else:
+            parts.append(col)
+    return ", ".join(parts)
+
+
 def _validate_parquet_files(parquet_files: Union[str, List[str]]) -> List[str]:
-    """Validate parquet files exist and return as list."""
     if isinstance(parquet_files, str):
         parquet_files = [parquet_files]
-
-    # Resolve paths relative to workspace root if needed, or assume absolute/relative to CWD
-    # Here we assume the user passes paths that are valid from CWD
-    validated_files = []
     for file_path in parquet_files:
-        path = Path(file_path)
-        if not path.exists():
-            # Try looking in data/ folder if not found in root
-            if not str(path).startswith("data/"):
-                alt_path = Path("data") / path
-                if alt_path.exists():
-                    validated_files.append(str(alt_path))
-                    continue
-            
+        if not Path(file_path).exists():
             raise FileNotFoundError(
                 f"Parquet file not found: {file_path}\n"
                 f"Please check the file path and ensure the file exists. "
                 f"You may use 'list_tables_in_directory' to discover available parquet files."
             )
-        validated_files.append(str(path))
-    return validated_files
+    return parquet_files
 
-def list_tables_in_directory(directory: str = "data") -> str:
+
+def list_tables_in_directory(directory: str) -> str:
     """
-    List all parquet files in the specified directory with metadata.
+    List all parquet files in a directory with metadata.
+
+    Args:
+        directory: Directory path to search for parquet files
+
+    Returns:
+        JSON string containing list of files with metadata
     """
+    duckdb = _import_duckdb()
+
     dir_path = Path(directory)
     if not dir_path.exists():
-        # If user passed "." but meant "data", or vice versa, try to be helpful
-        if directory == "." and Path("data").exists():
-             return json.dumps({"error": f"Directory not found: {directory}. Did you mean 'data'?"})
         return json.dumps({"error": f"Directory not found: {directory}"})
-    
     if not dir_path.is_dir():
         return json.dumps({"error": f"Path is not a directory: {directory}"})
 
     files_info = []
     cwd = Path.cwd()
-    
-    for file_path in dir_path.glob("*.parquet"):
+
+    for file_path in sorted(dir_path.rglob("*.parquet")):
+        if file_path.stem not in ALLOWED_STEMS:
+            continue
         file_path_str = str(file_path)
-        
+        if file_path.is_absolute():
+            try:
+                file_path_str = str(file_path.relative_to(cwd))
+            except ValueError:
+                file_path_str = str(file_path)
+
         try:
             conn = duckdb.connect(":memory:")
-            row_count_result = conn.execute(f"SELECT COUNT(*) FROM read_parquet('{file_path_str}')").fetchone()
-            if row_count_result is None:
-                raise RuntimeError("Failed to read row count from parquet file")
-            row_count = row_count_result[0]
-            
-            result = conn.execute(f"SELECT * FROM read_parquet('{file_path_str}') LIMIT 0")
-            column_count = len(result.description) if result.description else 0
+            row_count_result = conn.execute(
+                f"SELECT COUNT(*) FROM read_parquet('{file_path}')"
+            ).fetchone()
+            row_count = row_count_result[0] if row_count_result else 0
+            result = conn.execute(f"SELECT * FROM read_parquet('{file_path}') LIMIT 0")
+            column_count = len(result.description)
             conn.close()
-
-            files_info.append(
-                {
-                    "filename": file_path.name,
-                    "path": str(file_path),
-                    "row_count": row_count,
-                    "column_count": column_count,
-                }
-            )
-        except Exception as e:
             files_info.append({
-                "filename": file_path.name, 
-                "path": str(file_path), 
-                "error": str(e)
+                "filename": file_path.name,
+                "path": str(file_path),
+                "row_count": row_count,
+                "column_count": column_count,
             })
-    
-    if not files_info and directory == "." and Path("data").exists():
-         # If no files in root, check data/ and suggest it
-         data_files = [str(f.name) for f in Path("data").glob("*.parquet")]
-         if data_files:
-             return json.dumps({
-                 "directory": directory, 
-                 "files": [], 
-                 "hint": "No parquet files found in current directory. Found files in 'data/' directory. Please try list_tables_in_directory('data')."
-             }, indent=2)
+        except Exception as e:
+            files_info.append({"filename": file_path.name, "path": str(file_path), "error": str(e)})
 
-    return json.dumps(files_info, ensure_ascii=False, indent=2)
+    result_json = json.dumps(files_info, ensure_ascii=False, indent=2)
+    return _enforce_token_limit(result_json, "list_tables_in_directory")
 
-def get_schema(parquet_file: Union[str, List[str]]) -> str:
-    """
-    Get the schema (column names and types) of one or more parquet files.
-    """
+
+def _get_schema_one(parquet_file: str) -> dict:
+    duckdb = _import_duckdb()
+
+    if not Path(parquet_file).exists():
+        return {"error": f"Parquet file not found: {parquet_file}"}
+
+    conn = duckdb.connect(":memory:")
     try:
-        parquet_files = _validate_parquet_files(parquet_file)
-        
-        schemas = []
-        conn = duckdb.connect(":memory:")
-        
-        for file_path in parquet_files:
-            try:
-                # Get schema
-                result = conn.execute(f"SELECT * FROM read_parquet('{file_path}') LIMIT 0")
-                if result.description:
-                    schema = [{"name": desc[0], "type": str(desc[1])} for desc in result.description]
-                else:
-                    schema = []
-
-                # Get row count
-                row_count_result = conn.execute(f"SELECT COUNT(*) FROM read_parquet('{file_path}')").fetchone()
-                if row_count_result is None:
-                    raise RuntimeError("Failed to read row count from parquet file")
-                row_count = row_count_result[0]
-
-                schema_info = {
-                    "file": file_path,
-                    "row_count": row_count,
-                    "columns": schema,
-                }
-                
-                # Check for special characters in column names to provide a hint
-                has_special_chars = any("." in col["name"] or "-" in col["name"] for col in schema)
-                if has_special_chars:
-                     schema_info["note"] = "Some columns contain special characters (dots or hyphens). You MUST enclose them in double quotes in your SQL queries (e.g., \"attr.status_code\")."
-                
-                schemas.append(schema_info)
-            except Exception as e:
-                schemas.append({"file": file_path, "error": str(e)})
-
-        if len(schemas) == 1:
-            return json.dumps(schemas[0], ensure_ascii=False, indent=2)
-        
-        return json.dumps(schemas, ensure_ascii=False, indent=2)
+        result = conn.execute(f"SELECT * FROM read_parquet('{parquet_file}') LIMIT 0")
+        schema = [
+            {"name": _sanitize_column_name(desc[0]), "type": str(desc[1])}
+            for desc in result.description
+        ]
+        row_count_result = conn.execute(
+            f"SELECT COUNT(*) FROM read_parquet('{parquet_file}')"
+        ).fetchone()
+        row_count = row_count_result[0] if row_count_result else 0
+        return {"file": parquet_file, "row_count": row_count, "columns": schema}
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return {"error": f"Failed to extract schema: {str(e)}"}
+    finally:
+        conn.close()
 
-def query_parquet_files(parquet_files: Union[str, List[str]], query: str) -> str:
+
+def get_schema(parquet_files: Union[str, List[str]]) -> str:
     """
-    Query parquet files using SQL syntax.
+    Get schema information of a parquet file, or a list of parquet files.
+
+    Args:
+        parquet_files: Path to a parquet file, or list of paths for batch lookup
+
+    Returns:
+        JSON string containing file metadata — single object if one file, list if multiple
     """
-    table_names = set()
+    if isinstance(parquet_files, str):
+        result_json = json.dumps(_get_schema_one(parquet_files), ensure_ascii=False, indent=2)
+    else:
+        result_json = json.dumps(
+            [_get_schema_one(f) for f in parquet_files], ensure_ascii=False, indent=2
+        )
+    return _enforce_token_limit(result_json, "get_schema")
+
+
+def query_parquet_files(parquet_files: Union[str, List[str]], query: str, limit: int = 10) -> str:
+    """
+    Query parquet files using SQL syntax for data analysis and exploration.
+
+    Args:
+        parquet_files: Path(s) to parquet file(s)
+        query: SQL query to execute
+        limit: Maximum number of records to return
+
+    Returns:
+        JSON string of query results
+    """
+    duckdb = _import_duckdb()
     try:
         parquet_files = _validate_parquet_files(parquet_files)
-        
-        conn = duckdb.connect(":memory:")
-        
-        # Register parquet files as views using filename as table name
+    except FileNotFoundError as e:
+        return json.dumps({"error": str(e)})
+
+    conn = duckdb.connect(":memory:")
+    table_names: set = set()
+
+    try:
+        cwd = Path.cwd()
+        relative_files = []
+        for file_path in parquet_files:
+            fp = Path(file_path)
+            if fp.is_absolute():
+                try:
+                    file_path = str(fp.relative_to(cwd))
+                except ValueError:
+                    file_path = str(fp)
+            relative_files.append(file_path)
+        parquet_files = relative_files
+
         for file_path in parquet_files:
             base_name = Path(file_path).stem
             table_name = base_name
@@ -208,39 +254,40 @@ def query_parquet_files(parquet_files: Union[str, List[str]], query: str) -> str
                 table_name = f"{base_name}_{counter}"
                 counter += 1
             table_names.add(table_name)
-            # Use read_parquet for robustness
-            conn.execute(f"CREATE VIEW {table_name} AS SELECT * FROM read_parquet('{file_path}')")
-                
-        # Execute query
-        cursor = conn.execute(query)
-        result = cursor.fetchall()
-        
-        if cursor.description is None:
-            columns = []
-        else:
-            columns = [desc[0] for desc in cursor.description]
-        
-        # Convert to list of dicts
-        result_dicts = [dict(zip(columns, row)) for row in result]
-        
-        # Serialize
-        json_result = json.dumps(_serialize_datetime(result_dicts), ensure_ascii=False, indent=2)
-        
-        return _enforce_token_limit(json_result, query)
-        
+            select_clause = _build_rename_select(file_path)
+            conn.execute(
+                f"CREATE VIEW {table_name} AS SELECT {select_clause} FROM read_parquet('{file_path}')"
+            )
+
+        result = conn.execute(query).fetchall()
+        columns = [desc[0] for desc in conn.description]
+        rows = _serialize_datetime([dict(zip(columns, row)) for row in result])
+
+        if len(rows) > limit:
+            rows = rows[:limit]
+
+        result_json = json.dumps(rows, ensure_ascii=False, indent=2)
+        return _enforce_token_limit(result_json, "query_parquet_files")
+
     except Exception as e:
         error_msg = str(e)
-        # Provide contextual error messages similar to parquet_tools.py
-        available_tables = ', '.join(table_names) if table_names else 'None'
         if "syntax error" in error_msg.lower() or "parser error" in error_msg.lower():
             return json.dumps({
-                "error": f"SQL syntax error: {error_msg}",
-                "hint": "Check your SQL syntax. Use 'get_schema' to verify column names. Remember to quote columns with dots like \"attr.status_code\"."
+                "error": f"SQL syntax error in query: {error_msg}",
+                "query": query,
+                "available_tables": list(table_names),
             })
         elif "catalog" in error_msg.lower() or "table" in error_msg.lower():
             return json.dumps({
-                "error": f"Table/Column reference error: {error_msg}",
-                "hint": f"Ensure table names match filenames (e.g., 'abnormal_logs') and column names are correct. Available tables: {available_tables}"
+                "error": f"Table reference error: {error_msg}",
+                "query": query,
+                "available_tables": list(table_names),
             })
         else:
-            return json.dumps({"error": f"Query execution failed: {error_msg}"})
+            return json.dumps({
+                "error": f"Query execution failed: {error_msg}",
+                "query": query,
+                "available_tables": list(table_names),
+            })
+    finally:
+        conn.close()
